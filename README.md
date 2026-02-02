@@ -1,6 +1,3 @@
-# libundave
-reversing &amp; decrypting "DAVE", discords ETEE protocol :D
-
 # My Research on Discord's "DAVE" Protocol
 
 ---
@@ -15,6 +12,25 @@ After spending way too much time digging through Discord's open-source code and 
 2. Discord literally sends you the Welcome message with all the group secrets
 3. From there, you can derive every sender's decryption key
 4. The actual decryption is just standard AES-128-GCM
+
+<details>
+<summary>🤔 What is MLS?</summary>
+
+**MLS (Messaging Layer Security)** is a protocol for end-to-end encrypted group communication, defined in RFC 9420. Think of it like Signal's protocol but designed specifically for groups. It lets everyone in a group agree on shared encryption keys without any server (including Discord) being able to see those keys.
+
+The clever part is how it handles people joining and leaving - it uses a tree structure so you don't have to redo everything when someone joins.
+</details>
+
+<details>
+<summary>🤔 What is AES-128-GCM?</summary>
+
+**AES-128-GCM** is an encryption algorithm. Breaking it down:
+- **AES** = Advanced Encryption Standard (the actual cipher)
+- **128** = key size in bits (16 bytes)
+- **GCM** = Galois/Counter Mode (a mode that provides both encryption AND authentication)
+
+The "authentication" part is important - it means you can detect if someone tampered with the data. That's what the "auth tag" is for.
+</details>
 
 The catch? Nobody's publicly documented how to do this yet. I'd be the first to fully reverse engineer and implement it.
 
@@ -64,6 +80,34 @@ So Discord's DAVE system has two encryption layers. Here's a diagram I made:
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
+<details>
+<summary>🤔 What is an SFU?</summary>
+
+**SFU (Selective Forwarding Unit)** is basically a smart relay server. Instead of everyone sending their audio to everyone else (which would be a nightmare with 10+ people), everyone sends to the SFU, and the SFU forwards it to everyone else.
+
+The "selective" part means it can choose what to forward - like not sending video if someone's connection is bad, or prioritizing the person currently speaking.
+
+With DAVE, the SFU can still do its job because it only needs the RTP headers (which aren't E2E encrypted), but it can't actually hear what anyone is saying.
+</details>
+
+<details>
+<summary>🤔 What is SRTP/DTLS?</summary>
+
+**SRTP (Secure Real-time Transport Protocol)** is encryption for media streams. It wraps RTP packets so they're encrypted between you and the server.
+
+**DTLS (Datagram Transport Layer Security)** is basically TLS but for UDP. It's used to set up the SRTP keys.
+
+These provide the "transport layer" encryption - protecting data between you and Discord's servers. DAVE adds another layer on top that Discord can't decrypt.
+</details>
+
+<details>
+<summary>🤔 What is E2EE?</summary>
+
+**E2EE (End-to-End Encryption)** means only the people in the conversation can decrypt the messages. The servers in between (Discord, in this case) can pass the encrypted data around but can't read it.
+
+This is different from regular encryption where the server decrypts incoming data and re-encrypts it for the recipient.
+</details>
+
 The important thing here is that Layer 2 (the E2EE part) means Discord's servers literally cannot decrypt voice data. But since I'm a participant in the call, I get the keys. Thanks Discord!
 
 ### Protocol Specs (DAVE v1.1)
@@ -79,6 +123,18 @@ From what I dug up, here are the actual parameters they use:
 | Nonce               | 12 bytes (but only 4 bytes sent in frame) |
 | Auth Tag            | 8 bytes (truncated from the usual 16)     |
 | Magic Marker        | `0xFAFA`                                  |
+
+<details>
+<summary>🤔 What does that ciphersuite name mean?</summary>
+
+`DHKEMP256_AES128GCM_SHA256_P256` breaks down to:
+- **DHKEM** = Diffie-Hellman Key Encapsulation Mechanism (how keys are exchanged)
+- **P256** = The elliptic curve used (also called secp256r1 or prime256v1)
+- **AES128GCM** = The encryption algorithm for actual data
+- **SHA256** = The hash function used for various operations
+
+It's just a fancy way of saying "use these specific crypto algorithms together."
+</details>
 
 ---
 
@@ -112,6 +168,30 @@ This is where it gets complicated. MLS (Messaging Layer Security) is how everyon
 
 Basically: you generate keys → send a "key package" → Discord proposes adding you → someone commits → you get a Welcome message → now you're in the group and can derive everyone's keys. Pretty straightforward once you understand the flow.
 
+<details>
+<summary>🤔 What's a "Key Package"?</summary>
+
+A **Key Package** is like your "membership application" to join an MLS group. It contains:
+- Your public encryption key (so others can encrypt stuff for you)
+- Your public signature key (so others can verify messages are from you)
+- Your identity/credential (in Discord's case, your user ID)
+- Some metadata like when it expires
+
+You generate this before joining, send it to the server, and when someone wants to add you to the group, they use your key package to encrypt the welcome message that only you can decrypt.
+</details>
+
+<details>
+<summary>🤔 What's a "Commit" and "Welcome"?</summary>
+
+In MLS, changes to the group (adding/removing members) happen through **Proposals** and **Commits**:
+
+- **Proposal**: "Hey, I think we should add user X" or "User Y left"
+- **Commit**: "OK, I'm making these proposals official" - this actually changes the group state
+- **Welcome**: A special message sent to new members containing everything they need to join (encrypted so only they can read it)
+
+Only one person can commit at a time (the one who "wins" gets their commit accepted), which prevents weird race conditions.
+</details>
+
 ### The Key Package
 
 I found this in their `session.cpp` file - this is how they generate the key package:
@@ -131,6 +211,18 @@ What's actually in there:
 - Your signature public key (for auth)
 - Your credential (just your Discord user ID as a 64-bit big-endian number)
 - Lifetime set to basically forever (`not_before=0, not_after=2^64-1`) — because who needs key rotation anyway? /s
+
+<details>
+<summary>🤔 What is HPKE?</summary>
+
+**HPKE (Hybrid Public Key Encryption)** is a standard (RFC 9180) for encrypting messages using public key cryptography.
+
+The "hybrid" part means it combines:
+1. Asymmetric crypto (like ECDH) to establish a shared secret
+2. Symmetric crypto (like AES) to actually encrypt the data
+
+This is more efficient than encrypting everything with public key crypto directly, which is slow for large data.
+</details>
 
 ### How Sender Keys Get Derived (This Is The Good Stuff)
 
@@ -176,6 +268,37 @@ actual_key = key_ratchet.get(generation)
 ```
 
 The `generation` comes from the top byte of the nonce in each frame. More on that later.
+
+<details>
+<summary>🤔 What is a Key Ratchet / Hash Ratchet?</summary>
+
+A **Key Ratchet** is a mechanism for generating a sequence of keys from a single "base secret." It's called a ratchet because it only goes forward - you can derive key #5 from the base, but you can't go backwards from key #5 to get key #4.
+
+The **Hash Ratchet** specifically works by repeatedly hashing:
+```
+key_0 = HKDF(base_secret, "key_0")
+key_1 = HKDF(base_secret, "key_1")
+... and so on
+```
+
+This is useful because:
+1. If someone steals key #5, they can't decrypt past messages (forward secrecy)
+2. You can skip ahead to any key number without computing all the ones before it
+
+Discord uses the "generation" number in each frame to tell you which key to use.
+</details>
+
+<details>
+<summary>🤔 What does "little-endian" mean?</summary>
+
+**Endianness** is about byte order when storing multi-byte numbers.
+
+Take the number `0x12345678` (4 bytes):
+- **Big-endian**: stored as `12 34 56 78` (most significant byte first)
+- **Little-endian**: stored as `78 56 34 12` (least significant byte first)
+
+Discord stores user IDs as little-endian 64-bit integers for the MLS context. Getting this wrong = wrong keys = decryption fails. Ask me how I know... 😅
+</details>
 
 ---
 
@@ -225,6 +348,28 @@ You                              Voice Gateway                     SFU
  │              UDP RTP MEDIA          │                            │
  │◄────────────────────────────────────┼───────────────────────────►│
 ```
+
+<details>
+<summary>🤔 What is SSRC?</summary>
+
+**SSRC (Synchronization Source Identifier)** is a 32-bit number that identifies who's sending a particular audio/video stream in RTP.
+
+Each participant in a call gets their own SSRC. When you receive an RTP packet, you check the SSRC to know who it came from. Discord tells you the SSRC-to-user mapping when people join/leave.
+
+It's randomly generated to avoid collisions when multiple streams get mixed together.
+</details>
+
+<details>
+<summary>🤔 What is a WebSocket?</summary>
+
+**WebSocket** is a protocol for two-way communication over a single TCP connection. Unlike HTTP (request-response), WebSocket lets either side send messages at any time.
+
+Discord uses WebSocket for:
+- Main gateway (presence, messages, events)
+- Voice gateway (voice state, MLS messages, signaling)
+
+The actual audio/video goes over UDP (RTP), but all the control messages go over WebSocket.
+</details>
 
 ### DAVE Opcodes
 
@@ -304,6 +449,50 @@ Every encrypted audio/video frame looks like this:
 ```
 
 The way you know something is a DAVE frame: it ends with `0xFAFA`. That's the magic marker. Very creative naming, Discord.
+
+<details>
+<summary>🤔 What is ULEB128?</summary>
+
+**ULEB128 (Unsigned Little-Endian Base 128)** is a variable-length encoding for integers. Small numbers take fewer bytes, big numbers take more.
+
+How it works:
+- Each byte uses 7 bits for data and 1 bit (the high bit) to say "there's more"
+- If high bit = 1, read another byte
+- If high bit = 0, you're done
+
+Examples:
+- `0x05` (5) encodes as: `05` (1 byte)
+- `0x80` (128) encodes as: `80 01` (2 bytes)
+- `0x3FFF` (16383) encodes as: `FF 7F` (2 bytes)
+
+It's used a lot in binary formats because most numbers are small, so you save space on average.
+</details>
+
+<details>
+<summary>🤔 What is a Nonce?</summary>
+
+A **nonce** (Number used ONCE) is a random or sequential value used exactly once with a given key. For AES-GCM:
+
+- It MUST be unique for each message encrypted with the same key
+- If you reuse a nonce with the same key, the encryption is completely broken
+- AES-GCM uses a 12-byte (96-bit) nonce
+
+Discord uses a counter as their nonce - it goes up by 1 for each frame. The "generation" in the top byte tells you which key to use, and the rest is the actual counter.
+</details>
+
+<details>
+<summary>🤔 What's an "Auth Tag"?</summary>
+
+The **Authentication Tag** (or just "tag") is how AES-GCM proves the data wasn't tampered with.
+
+When encrypting, the algorithm produces:
+1. The ciphertext (encrypted data)
+2. A tag (typically 16 bytes)
+
+When decrypting, you provide the tag. If the ciphertext or AAD was modified even slightly, the tag check fails and decryption is rejected.
+
+Discord truncates this to 8 bytes to save bandwidth (voice/video generates a LOT of data). 8 bytes is still 64 bits of security, which is plenty for short-lived media frames.
+</details>
 
 ### The Parsing Algorithm
 
@@ -398,6 +587,18 @@ bool OpenSSLCryptor::Decrypt(
 }
 ```
 
+<details>
+<summary>🤔 What is AAD (Additional Authenticated Data)?</summary>
+
+**AAD (Additional Authenticated Data)** is data that gets authenticated (protected from tampering) but NOT encrypted.
+
+In DAVE, some parts of the frame stay unencrypted (like certain codec headers) but we still want to detect if someone messed with them. So they go into the AAD.
+
+When decrypting:
+- If the AAD doesn't match what was used during encryption → auth tag fails → decryption rejected
+- The AAD itself is never encrypted, just verified
+</details>
+
 ### Nonce Expansion
 
 The frame only has a 4-byte truncated nonce, but AES-GCM needs 12 bytes. Here's how they expand it:
@@ -468,6 +669,20 @@ ws.send(JSON.stringify({
 // 6. Receive Session Description (op 4) with secret_key and dave_protocol_version
 ```
 
+<details>
+<summary>🤔 What is IP Discovery?</summary>
+
+**IP Discovery** (sometimes called STUN-like discovery) is how you figure out your public IP and port when you're behind NAT.
+
+Discord's version:
+1. Send a special packet to their server with your SSRC
+2. Server sees what IP:port it came from (your public address)
+3. Server sends that info back to you
+4. You tell Discord "hey, send my audio to this address"
+
+This is necessary because your computer often doesn't know its own public IP (it just knows its local 192.168.x.x address).
+</details>
+
 ### RTP Packet Structure
 
 ```
@@ -498,6 +713,20 @@ ws.send(JSON.stringify({
 ║                                                                  ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
+
+<details>
+<summary>🤔 What is RTP?</summary>
+
+**RTP (Real-time Transport Protocol)** is the standard for streaming audio/video over the internet. Pretty much every VoIP/video call uses it.
+
+The header contains:
+- **Sequence number**: detect packet loss and reorder
+- **Timestamp**: sync audio/video timing
+- **SSRC**: identify who's sending
+- **Payload type**: what codec is being used
+
+RTP itself doesn't provide encryption - that's what SRTP and DAVE add on top.
+</details>
 
 ### The Two Decryption Layers
 
@@ -534,6 +763,20 @@ When you receive a packet, you gotta decrypt it twice:
         RAW PCM / RAW VIDEO
            (profit???)
 ```
+
+<details>
+<summary>🤔 What is Opus?</summary>
+
+**Opus** is an audio codec designed for real-time communication. Discord uses it for all voice chat.
+
+Why Opus is great:
+- Low latency (important for real-time)
+- Works well at many bitrates (6 kbps to 510 kbps)
+- Handles both speech and music well
+- Open standard, royalty-free
+
+Discord typically uses 48kHz sample rate, stereo, at around 64-128 kbps.
+</details>
 
 ---
 
@@ -649,6 +892,19 @@ When you receive a packet, you gotta decrypt it twice:
 ---
 
 ## 7. What I Found In libdave's Source Code
+
+<details>
+<summary>🤔 What is libdave?</summary>
+
+**libdave** is Discord's official open-source implementation of the DAVE protocol. They published it on GitHub at `github.com/discord/libdave`.
+
+It has:
+- **C++ implementation**: The core library, uses OpenSSL and mlspp
+- **JavaScript/WASM build**: Same C++ code compiled to WebAssembly for browser use
+- **Protocol documentation**: Though not super detailed, it helped me figure things out
+
+I spent a lot of time reading through the C++ source to understand exactly how encryption/decryption works.
+</details>
 
 ### Constants (from common.h)
 
