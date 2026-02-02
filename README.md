@@ -156,11 +156,12 @@ This is where it gets complicated. MLS (Messaging Layer Security) is how everyon
 ║   │  Key Pair   │         │  to Server  │          │  Remove     │    ║
 ║   └─────────────┘         └─────────────┘          └──────┬──────┘    ║
 ║                                                           │           ║
-║   4. COMMIT                5. WELCOME               6. DECRYPT        ║
+║                                                           ▼           ║
+║   6. DECRYPT               5. WELCOME               4. COMMIT         ║
 ║   ┌─────────────┐         ┌─────────────┐          ┌─────────────┐    ║
-║   │  Someone    │         │  New member │          │  Now you    │    ║
-║   │  commits    │◄────────│  gets the   │◄─────────│  can export │    ║
-║   │  proposals  │         │  Welcome!   │          │  sender keys│    ║
+║   │  Now you    │         │  New member │          │  Someone    │    ║
+║   │  can export │◄────────│  gets the   │◄─────────│  commits    │    ║
+║   │  sender keys│         │  Welcome!   │          │  proposals  │    ║
 ║   └─────────────┘         └─────────────┘          └─────────────┘    ║
 ║                                                                       ║
 ╚═══════════════════════════════════════════════════════════════════════╝
